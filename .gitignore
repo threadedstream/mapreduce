@@ -1,0 +1,5 @@
+build/
+*.so
+*.xml
+*.iml
+.idea/
