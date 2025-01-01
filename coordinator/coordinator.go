@@ -20,19 +20,25 @@ import (
 // Coordinator is central element, that serves user requests and coordinates worker nodes
 
 // Main is an entrypoint for coordinator
-func Main() {
-
+func Main(ctx context.Context, logger *zap.Logger) error {
+	_, err := NewCoordinator(ctx, logger)
+	return err
 }
 
 type Coordinator struct {
+	baseCtx     context.Context
 	server      *rpc.Server
 	workerNodes map[string]struct{}
+	mu          sync.Mutex // protects access to workerNodes
 	logger      *zap.Logger
 }
 
-func NewCoordinator() (*Coordinator, error) {
+func NewCoordinator(ctx context.Context, logger *zap.Logger) (*Coordinator, error) {
 	c := &Coordinator{
-		server: rpc.NewServer(),
+		server:      rpc.NewServer(),
+		baseCtx:     ctx,
+		workerNodes: make(map[string]struct{}),
+		logger:      logger,
 	}
 
 	if err := c.server.Register(c); err != nil {
@@ -59,6 +65,9 @@ func (c *Coordinator) startListening() error {
 }
 
 func (c *Coordinator) RegisterMe(req *coordinatorapi.RegisterMeRequest) (*coordinatorapi.RegisterMeReply, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logger.Info("adding new node", zap.String("node", req.MyAddress))
 	c.workerNodes[req.MyAddress] = struct{}{}
 	return &coordinatorapi.RegisterMeReply{}, nil
 }
@@ -119,7 +128,10 @@ func (c *Coordinator) heartbeatEvery(ctx context.Context, tick time.Duration) {
 		for workerNode := range c.workerNodes {
 			go func() {
 				if err := c.heartbeat(workerNode); err != nil {
+					c.mu.Lock()
 					c.logger.Error(fmt.Sprintf("failed to reach node %s", workerNode))
+					delete(c.workerNodes, workerNode)
+					c.mu.Unlock()
 				}
 			}()
 		}
@@ -151,7 +163,7 @@ func sendAsync(ctx context.Context, addr, method string, args, reply any) error 
 	}
 
 	done := make(chan *rpc.Call)
-	_ = cli.Go("Worker.Heartbeat", &workerapi.HeartBeatRequest{}, &workerapi.HeartbeatReply{}, done)
+	_ = cli.Go(method, args, reply, done)
 
 	select {
 	case <-ctx.Done():
